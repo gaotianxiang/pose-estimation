@@ -72,13 +72,14 @@ def main():
     parser.add_argument('--num_stack', default=1, type=int)
     parser.add_argument('--resume', '--r', action='store_true')
     parser.add_argument('--gpu', default="0", type=str)
+    parser.add_argument('--dtst_path', default='/home/tianxiang/dataset/mpii/', type=str)
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
     num_stack = args.num_stack
     batch_size = 16
     lr = 1e-4
-    tfrecords_path = '/home/tianxiang/dataset/mpii/tfr_processed/'
+    tfrecords_path = os.path.join(args.dtst_path, 'tfr_processed')
     num_epoch = 100
     ckpt_dir = '/home/tianxiang/codes/pose_estimation_codes/ckpt/num_stack_{}'.format(num_stack)
     tfboard_dir = '/home/tianxiang/codes/pose_estimation_codes/logs/num_stack_{}'.format(num_stack)
