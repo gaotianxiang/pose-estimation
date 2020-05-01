@@ -1,21 +1,23 @@
-import io
 import json
 import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
-from PIL import Image
 import ray
 import tensorflow as tf
 import numpy as np
+import argparse
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 num_train_shards = 64
 num_val_shards = 8
 ray.init()
 tf.get_logger().setLevel('ERROR')
 
-path = '/home/tianxiang/dataset/mpii/'
+parser = argparse.ArgumentParser()
+parser.add_argument('--path', default='/home/tianxiang/dataset/mpii/', type=str)
+args = parser.parse_args()
+
+path = args.path
 
 
 def chunkify(l, n):
@@ -41,13 +43,9 @@ def crop_roi(image, keypoint_x, keypoint_y, scale, margin=0.2):
     img_height = img_shape[0]
     img_width = img_shape[1]
     body_height = scale * 200.0
-    # img_depth = img_shape[2]
 
     keypoint_x = tf.cast(keypoint_x, dtype=tf.int32)
     keypoint_y = tf.cast(keypoint_y, dtype=tf.int32)
-    # center_x = features['image/object/center/x']
-    # center_y = features['image/object/center/y']
-    # body_height = features['image/object/scale'] * 200.0
 
     # avoid invisible keypoints whose value are -1
     masked_keypoint_x = tf.boolean_mask(keypoint_x, keypoint_x != -1)
@@ -70,8 +68,6 @@ def crop_roi(image, keypoint_x, keypoint_y, scale, margin=0.2):
     effective_ymin = ymin if ymin > 0 else 0
     effective_xmax = xmax if xmax < img_width else img_width
     effective_ymax = ymax if ymax < img_height else img_height
-    # effective_height = effective_ymax - effective_ymin
-    # effective_width = effective_xmax - effective_xmin
 
     image = image[effective_ymin:effective_ymax, effective_xmin:effective_xmax, :]
     new_shape = tf.shape(image)
@@ -154,7 +150,6 @@ def generate_2d_guassian(height, width, y0, x0, visibility=2, sigma=1, scale=12)
 
 
 def make_heatmaps(joints_visibility, keypoint_x, keypoint_y, shape=(64, 64, 16)):
-    # v = tf.cast(tf.sparse.to_dense(features['image/object/parts/v']), dtype=tf.float32)
     v = tf.cast(joints_visibility, tf.float32)
     x = tf.cast(tf.math.round(keypoint_x * shape[0]), dtype=tf.int32)
     y = tf.cast(tf.math.round(keypoint_y * shape[1]), dtype=tf.int32)
@@ -197,51 +192,6 @@ def genreate_tfexample(anno, is_train):
         'image': _bytes_feature(tf.io.serialize_tensor(image)),  # tf.uint8
         'heatmap': _bytes_feature(tf.io.serialize_tensor(heatmap))  # tf.float32
     }
-    # filename = anno['filename']
-    # filepath = anno['filepath']
-    #
-    # with open(filepath, 'rb') as image_file:
-    #     content = image_file.read()
-    #
-    # image = Image.open(filepath)
-    # if image.format != 'JPEG' or image.mode != 'RGB':
-    #     image_rgb = image.convert('RGB')
-    #     with io.BytesIO() as output:
-    #         image_rgb.save(output, format="JPEG", quality=95)
-    #         content = output.getvalue()
-    #
-    # width, height = image.size
-    # depth = 3
-    #
-    # x = [int(joint[0]) for joint in anno['joints']]
-    # y = [int(joint[1]) for joint in anno['joints']]
-    #
-    # # x = [
-    # #     joint[0] / width if joint[0] >= 0 else joint[0]
-    # #     for joint in anno['joints']
-    # # ]
-    # # y = [
-    # #     joint[1] / height if joint[1] >= 0 else joint[0]
-    # #     for joint in anno['joints']
-    # # ]
-    # # 0 - invisible, 1 - occluded, 2 - visible
-    # v = [0 if joint_v == 0 else 1 for joint_v in anno['joints_visibility']]
-    # center = anno['center']
-    # scale = anno['scale']
-    #
-    # feature = {
-    #     'image/height': tf.train.Feature(int64_list=tf.train.Int64List(value=[height])),
-    #     'image/width': tf.train.Feature(int64_list=tf.train.Int64List(value=[width])),
-    #     'image/depth': tf.train.Feature(int64_list=tf.train.Int64List(value=[depth])),
-    #     'image/object/parts/x': tf.train.Feature(int64_list=tf.train.Int64List(value=x)),
-    #     'image/object/parts/y': tf.train.Feature(int64_list=tf.train.Int64List(value=y)),
-    #     'image/object/parts/v': tf.train.Feature(int64_list=tf.train.Int64List(value=v)),
-    #     'image/object/center/x': tf.train.Feature(int64_list=tf.train.Int64List(value=[int(center[0])])),
-    #     'image/object/center/y': tf.train.Feature(int64_list=tf.train.Int64List(value=[int(center[1])])),
-    #     'image/object/scale': tf.train.Feature(float_list=tf.train.FloatList(value=[scale])),
-    #     'image/encoded': _bytes_feature(content),
-    #     'image/filename': _bytes_feature(filename.encode())
-    # }
 
     return tf.train.Example(features=tf.train.Features(feature=feature))
 
@@ -249,7 +199,6 @@ def genreate_tfexample(anno, is_train):
 @ray.remote
 def build_single_tfrecord(chunk, path, is_train):
     print('start to build tf records for ' + path)
-
     with tf.io.TFRecordWriter(path) as writer:
         for anno_list in chunk:
             try:
@@ -258,20 +207,18 @@ def build_single_tfrecord(chunk, path, is_train):
                 print(anno_list['filepath'])
             else:
                 writer.write(tf_example.SerializeToString())
-
     print('finished building tf records for ' + path)
 
 
 def build_tf_records(annotations, total_shards, split):
     chunks = chunkify(annotations, total_shards)
     futures = [
-        # train_0001_of_0064.tfrecords
         build_single_tfrecord.remote(
             chunk, os.path.join(path, 'tfr_processed', '{}_{}_of_{}.tfrecords'.format(
                 split,
                 str(i + 1).zfill(4),
-                str(total_shards).zfill(4)),
-                                ), split == 'train') for i, chunk in enumerate(chunks)
+                str(total_shards).zfill(4))),
+            split == 'train') for i, chunk in enumerate(chunks)
     ]
     ray.get(futures)
 
@@ -293,8 +240,6 @@ def parse_one_annotation(anno, image_dir):
 
 def main():
     print('Start to parse annotations.')
-
-    # if not os.path.exists(os.path.join(path, 'tfrecords_mpii')):
     os.makedirs(os.path.join(path, 'tfr_processed'), exist_ok=True)
 
     with open(os.path.join(path, 'train.json')) as train_json:
