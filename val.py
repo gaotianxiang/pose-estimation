@@ -37,17 +37,10 @@ def _map(example):
 def get_image(image_path):
     encoded = tf.io.read_file(image_path)
     image = tf.image.decode_jpeg(encoded)
-    # inputs = tf.image.resize(image, (256, 256))
-    # inputs = tf.cast(inputs, tf.float32) / 127.5 - 1
-    # inputs = tf.expand_dims(inputs, axis=0)
     return image
 
 
 def predict(model, image, file_name, dir_name):
-    # file_name = image_path.split('/')[-1].split('.')[0]
-    # dir_name = os.path.dirname(image_path)
-    # encoded = tf.io.read_file(image_path)
-    # image = tf.image.decode_jpeg(encoded)
     inputs = tf.image.resize(image, (256, 256))
     inputs = tf.cast(inputs, tf.float32) / 127.5 - 1
     inputs = tf.expand_dims(inputs, axis=0)
@@ -55,15 +48,12 @@ def predict(model, image, file_name, dir_name):
     heatmap = tf.squeeze(outputs[-1], axis=0).numpy()
     kp = extract_keypoints_from_heatmap(heatmap)
     draw_skeleton_on_image(image, kp, os.path.join(dir_name, '{}_skeleton.png'.format(file_name)))
-    # draw_keypoints_on_image(image, kp, save_path=os.path.join(dir_name, '{}_keypoints.png'.format(file_name)))
 
 
 def restore(model):
     ckpt = tf.train.Checkpoint(model=model)
     manager = tf.train.CheckpointManager(ckpt, ckpt_path, max_to_keep=1)
     ckpt.restore(manager.latest_checkpoint)
-    # model.build((64, 64, 3))
-    # model.load_weights(os.path.join(ckpt_path, 'best_model.h5'))
 
 
 def main():
