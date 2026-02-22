@@ -1,4 +1,3 @@
-import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -34,88 +33,84 @@ MPII_BONES = [
     [THORAX, R_SHOULDER],
     [THORAX, L_SHOULDER],
     [L_SHOULDER, L_ELBOW],
-    [L_ELBOW, L_WRIST]
+    [L_ELBOW, L_WRIST],
 ]
 
 
-def find_max_coordinates(heatmaps):
-    flatten_heatmaps = tf.reshape(heatmaps, (4096, 16))
-    indices = tf.math.argmax(flatten_heatmaps, axis=0)
-    # after flatten, each 64 values represent one row in original heatmap
-    y = tf.cast(indices / 64, dtype=tf.int64)
+def find_max_coordinates(heatmaps: np.ndarray) -> np.ndarray:
+    """Return (x, y) peak coordinates for each of 16 keypoints.
+
+    Args:
+        heatmaps: shape (64, 64, 16)
+
+    Returns:
+        shape (16, 2) with columns [x, y]
+    """
+    flat = heatmaps.reshape(4096, 16)
+    indices = np.argmax(flat, axis=0)          # (16,)
+    y = indices // 64
     x = indices - 64 * y
-    return tf.stack([x, y], axis=1).numpy()
+    return np.stack([x, y], axis=1)            # (16, 2)
 
 
-def extract_keypoints_from_heatmap(heatmaps):
+def extract_keypoints_from_heatmap(heatmaps: np.ndarray) -> np.ndarray:
+    """Extract sub-pixel keypoint locations from heatmaps.
+
+    Args:
+        heatmaps: shape (64, 64, 16), float32
+
+    Returns:
+        normalised keypoints, shape (16, 2), values in [0, 1]
+    """
     max_keypoints = find_max_coordinates(heatmaps)
-    # pad the heatmap so that we don't need to deal with borders
-    padded_heatmap = np.pad(heatmaps, [[1, 1], [1, 1], [0, 0]])
-    adjusted_keypoints = []
-    for i, keypoint in enumerate(max_keypoints):
-        # since we've padded the heatmap, the max keypoint should increment by 1
-        max_y = keypoint[1] + 1
-        max_x = keypoint[0] + 1
-        # the patch is the 3x3 grid around the max keypoint location
-        patch = padded_heatmap[max_y - 1:max_y + 2, max_x - 1:max_x + 2, i]
-        # assign 0 to max location
-        patch[1][1] = 0
-        # and the next largest value is the largest neigbour we are looking for
-        index = np.argmax(patch)
-        # find out the location of it relative to center
-        next_y = index // 3
-        next_x = index - next_y * 3
-        delta_y = (next_y - 1) / 4
-        delta_x = (next_x - 1) / 4
-        # we can then add original max keypoint location with this offset
-        adjusted_keypoint_x = keypoint[0] + delta_x
-        adjusted_keypoint_y = keypoint[1] + delta_y
-        adjusted_keypoints.append((adjusted_keypoint_x, adjusted_keypoint_y))
-    # we do need to clip the value to make sure there's no keypoint out of border, just in case.
-    adjusted_keypoints = np.clip(adjusted_keypoints, 0, 64)
-    # normalize the points so that we can scale back easily
-    normalized_keypoints = adjusted_keypoints / 64
-    return normalized_keypoints
+    # Pad so border maxima can be handled uniformly
+    padded = np.pad(heatmaps, [[1, 1], [1, 1], [0, 0]])
+
+    adjusted = []
+    for i, kp in enumerate(max_keypoints):
+        # Shift by 1 due to padding
+        max_y = int(kp[1]) + 1
+        max_x = int(kp[0]) + 1
+
+        patch = padded[max_y - 1:max_y + 2, max_x - 1:max_x + 2, i].copy()
+        patch[1, 1] = 0  # zero out the peak to find the next-best neighbour
+
+        idx = np.argmax(patch)
+        ny = idx // 3
+        nx = idx - ny * 3
+        delta_y = (ny - 1) / 4
+        delta_x = (nx - 1) / 4
+
+        adjusted.append((kp[0] + delta_x, kp[1] + delta_y))
+
+    adjusted = np.clip(np.array(adjusted), 0, 64)
+    return adjusted / 64  # normalise to [0, 1]
 
 
-def draw_keypoints_on_image(image, keypoints, index=None, save_path=None):
+def draw_keypoints_on_image(image: np.ndarray, keypoints: np.ndarray,
+                             index=None, save_path: str = None):
     fig, ax = plt.subplots(1)
     ax.imshow(image)
-    joints = []
     for i, joint in enumerate(keypoints):
-        joint_x = joint[0] * image.shape[1]
-        joint_y = joint[1] * image.shape[0]
         if index is not None and index != i:
             continue
-        plt.scatter(joint_x, joint_y, s=10, c='red', marker='o')
+        jx = joint[0] * image.shape[1]
+        jy = joint[1] * image.shape[0]
+        plt.scatter(jx, jy, s=10, c='red', marker='o')
     plt.axis('off')
-    plt.savefig(save_path)
+    if save_path:
+        plt.savefig(save_path)
+    plt.close(fig)
 
 
-def draw_skeleton_on_image(image, keypoints, save_path):
+def draw_skeleton_on_image(image: np.ndarray, keypoints: np.ndarray, save_path: str):
     fig, ax = plt.subplots(1)
     ax.imshow(image)
-    joints = []
-    for i, joint in enumerate(keypoints):
-        joint_x = joint[0] * image.shape[1]
-        joint_y = joint[1] * image.shape[0]
-        joints.append((joint_x, joint_y))
-    # draw skeleton
+    joints = [(joint[0] * image.shape[1], joint[1] * image.shape[0])
+               for joint in keypoints]
     for bone in MPII_BONES:
-        joint_1 = joints[bone[0]]
-        joint_2 = joints[bone[1]]
-        plt.plot([joint_1[0], joint_2[0]], [joint_1[1], joint_2[1]], linewidth=5, alpha=0.7)
+        j1, j2 = joints[bone[0]], joints[bone[1]]
+        plt.plot([j1[0], j2[0]], [j1[1], j2[1]], linewidth=5, alpha=0.7)
     plt.axis('off')
     plt.savefig(save_path)
-
-
-def predict(image_path, model):
-    encoded = tf.io.read_file(image_path)
-    image = tf.io.decode_jpeg(encoded)
-    inputs = tf.image.resize(image, (256, 256))
-    inputs = tf.cast(inputs, tf.float32) / 127.5 - 1
-    inputs = tf.expand_dims(inputs, 0)
-    outputs = model(inputs, training=False)
-    heatmap = tf.squeeze(outputs[-1], axis=0).numpy()
-    kp = extract_keypoints_from_heatmap(heatmap)
-    return image, kp
+    plt.close(fig)
