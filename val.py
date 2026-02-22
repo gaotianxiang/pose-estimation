@@ -1,83 +1,114 @@
-import tensorflow as tf
-import tensorflow.keras as tfk
-import argparse
 import os
-import matplotlib.pyplot as plt
+import argparse
+import pickle
 
-tfd = tf.data
+import jax
+import jax.numpy as jnp
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+import tensorflow as tf
 
 from module import StackedHourglassNetwork
-from visualize import extract_keypoints_from_heatmap, draw_skeleton_on_image, draw_keypoints_on_image
+from visualize import extract_keypoints_from_heatmap, draw_skeleton_on_image
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--image_path', '--path', type=str)
-parser.add_argument('--num_stack', '--ns', default=1, type=int)
-parser.add_argument('--gpu', default="0", type=str)
-parser.add_argument('--train', action='store_true')
-parser.add_argument('--test', action='store_true')
-args = parser.parse_args()
 
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-ckpt_path = '/home/tianxiang/codes/pose_estimation_codes/ckpt/num_stack_{}'.format(args.num_stack)
-tfr_path = '/home/tianxiang/dataset/mpii/tfr_processed/'
+# ---------------------------------------------------------------------------
+# Checkpoint
+# ---------------------------------------------------------------------------
 
-example_feature = {
+def load_checkpoint(ckpt_dir: str):
+    ckpt_path = os.path.join(ckpt_dir, 'best.pkl')
+    with open(ckpt_path, 'rb') as f:
+        data = pickle.load(f)
+    return data['params'], data['batch_stats']
+
+
+# ---------------------------------------------------------------------------
+# Inference helpers
+# ---------------------------------------------------------------------------
+
+def preprocess_image(image: np.ndarray) -> np.ndarray:
+    """Resize to 256x256, normalise to [-1, 1], add batch dim."""
+    img = Image.fromarray(image).resize((256, 256))
+    arr = np.array(img, dtype=np.float32) / 127.5 - 1.0
+    return arr[None]  # (1, 256, 256, 3)
+
+
+def predict(model, params, batch_stats, image: np.ndarray, file_name: str, dir_name: str):
+    inputs = preprocess_image(image)
+    outputs = model.apply(
+        {'params': params, 'batch_stats': batch_stats},
+        inputs,
+        training=False,
+    )
+    heatmap = np.array(outputs[-1][0])  # (64, 64, 16)
+    kp = extract_keypoints_from_heatmap(heatmap)
+    os.makedirs(dir_name, exist_ok=True)
+    draw_skeleton_on_image(image, kp, os.path.join(dir_name, f'{file_name}_skeleton.png'))
+
+
+def get_image(image_path: str) -> np.ndarray:
+    return np.array(Image.open(image_path).convert('RGB'))
+
+
+# ---------------------------------------------------------------------------
+# TFRecord sampling helpers (reuse tf.data only for I/O)
+# ---------------------------------------------------------------------------
+
+_EXAMPLE_FEATURE = {
     'image': tf.io.FixedLenFeature([], tf.string),
-    'heatmap': tf.io.FixedLenFeature([], tf.string)
+    'heatmap': tf.io.FixedLenFeature([], tf.string),
 }
 
 
-def _map(example):
-    features = tf.io.parse_example(example, features=example_feature)
+def _parse_raw(example):
+    features = tf.io.parse_example(example, features=_EXAMPLE_FEATURE)
     image = tf.io.parse_tensor(features['image'], tf.uint8)
     heatmap = tf.io.parse_tensor(features['heatmap'], tf.float32)
     return image, heatmap
 
 
-def get_image(image_path):
-    encoded = tf.io.read_file(image_path)
-    image = tf.image.decode_jpeg(encoded)
-    return image
-
-
-def predict(model, image, file_name, dir_name):
-    inputs = tf.image.resize(image, (256, 256))
-    inputs = tf.cast(inputs, tf.float32) / 127.5 - 1
-    inputs = tf.expand_dims(inputs, axis=0)
-    outputs = model(inputs, training=False)
-    heatmap = tf.squeeze(outputs[-1], axis=0).numpy()
-    kp = extract_keypoints_from_heatmap(heatmap)
-    draw_skeleton_on_image(image, kp, os.path.join(dir_name, '{}_skeleton.png'.format(file_name)))
-
-
-def restore(model):
-    ckpt = tf.train.Checkpoint(model=model)
-    manager = tf.train.CheckpointManager(ckpt, ckpt_path, max_to_keep=1)
-    ckpt.restore(manager.latest_checkpoint)
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main():
-    model = StackedHourglassNetwork(args.num_stack)
-    restore(model)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image_path', '--path', type=str)
+    parser.add_argument('--num_stack', '--ns', default=1, type=int)
+    parser.add_argument('--train', action='store_true')
+    parser.add_argument('--test', action='store_true')
+    parser.add_argument('--dtst_path', default='/home/tianxiang/dataset/mpii/', type=str)
+    args = parser.parse_args()
+
+    ckpt_dir = f'./ckpt/num_stack_{args.num_stack}'
+    tfr_path = os.path.join(args.dtst_path, 'tfr_processed')
+
+    # Build model and load weights
+    model = StackedHourglassNetwork(num_stack=args.num_stack)
+    params, batch_stats = load_checkpoint(ckpt_dir)
+
     if not args.train and not args.test:
-        image_path = args.image_path
-        image = get_image(image_path)
-        predict(model, image, image_path.split('/')[-1].split('.')[0], os.path.dirname(image_path))
+        image = get_image(args.image_path)
+        file_name = os.path.splitext(os.path.basename(args.image_path))[0]
+        predict(model, params, batch_stats, image, file_name, os.path.dirname(args.image_path))
         return
 
     if args.train:
         tfr = [os.path.join(tfr_path, fn) for fn in os.listdir(tfr_path) if fn.startswith('train')]
-    elif args.test:
-        tfr = [os.path.join(tfr_path, fn) for fn in os.listdir(tfr_path) if fn.startswith('val')]
     else:
-        return
+        tfr = [os.path.join(tfr_path, fn) for fn in os.listdir(tfr_path) if fn.startswith('val')]
 
-    dtst = tfd.TFRecordDataset(tfr).shuffle(1000).take(20).map(_map)
+    os.makedirs('./test', exist_ok=True)
+    dataset = tf.data.TFRecordDataset(tfr).shuffle(1000).take(20).map(_parse_raw)
 
-    for i, (img, hm) in enumerate(dtst):
-        kp = extract_keypoints_from_heatmap(hm)
-        draw_skeleton_on_image(img, kp, os.path.join('./test/{}_gt.png'.format(i)))
-        predict(model, img, '{}'.format(i), './test')
+    for i, (img_tf, hm_tf) in enumerate(dataset):
+        img = img_tf.numpy()   # uint8 numpy array
+        hm = hm_tf.numpy()     # float32 numpy array
+        kp_gt = extract_keypoints_from_heatmap(hm)
+        draw_skeleton_on_image(img, kp_gt, f'./test/{i}_gt.png')
+        predict(model, params, batch_stats, img, str(i), './test')
 
 
 if __name__ == '__main__':

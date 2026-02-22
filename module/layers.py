@@ -1,87 +1,68 @@
-import tensorflow as tf
-import tensorflow.keras as tfk
-import tensorflow.keras.layers as tfkl
+import jax
+import jax.numpy as jnp
+import flax.linen as nn
 
 
-class BottleneckBlock(tfkl.Layer):
-    def __init__(self, filters, downsample=False):
-        super(BottleneckBlock, self).__init__()
-        self.filters = filters
-        self.down_sample = downsample
+class BottleneckBlock(nn.Module):
+    filters: int
+    downsample: bool = False
 
-    def build(self, input_shape):
-        if self.down_sample:
-            self.identity_map = tfkl.Conv2D(self.filters, kernel_size=1, padding='same',
-                                            kernel_initializer=tfk.initializers.he_normal())
-
-        self.bottleneck = tfk.Sequential([
-            tfkl.BatchNormalization(momentum=0.9),
-            tfkl.ReLU(),
-            tfkl.Conv2D(self.filters // 2, kernel_size=1, padding='same',
-                        kernel_initializer=tfk.initializers.he_normal()),
-
-            tfkl.BatchNormalization(momentum=0.9),
-            tfkl.ReLU(),
-            tfkl.Conv2D(self.filters // 2, kernel_size=3, padding='same',
-                        kernel_initializer=tfk.initializers.he_normal()),
-
-            tfkl.BatchNormalization(),
-            tfkl.ReLU(),
-            tfkl.Conv2D(self.filters, kernel_size=1, padding='same',
-                        kernel_initializer=tfk.initializers.he_normal())
-        ])
-
-    def call(self, x, **kwargs):
+    @nn.compact
+    def __call__(self, x, training: bool = False):
         identity = x
-        if self.down_sample:
-            identity = self.identity_map(x)
-        out = self.bottleneck(x)
-        res = identity + out
-        return res
+        if self.downsample:
+            identity = nn.Conv(self.filters, kernel_size=(1, 1), padding='SAME',
+                               kernel_init=nn.initializers.he_normal())(x)
+
+        out = nn.BatchNorm(momentum=0.9)(x, use_running_average=not training)
+        out = nn.relu(out)
+        out = nn.Conv(self.filters // 2, kernel_size=(1, 1), padding='SAME',
+                      kernel_init=nn.initializers.he_normal())(out)
+
+        out = nn.BatchNorm(momentum=0.9)(out, use_running_average=not training)
+        out = nn.relu(out)
+        out = nn.Conv(self.filters // 2, kernel_size=(3, 3), padding='SAME',
+                      kernel_init=nn.initializers.he_normal())(out)
+
+        out = nn.BatchNorm()(out, use_running_average=not training)
+        out = nn.relu(out)
+        out = nn.Conv(self.filters, kernel_size=(1, 1), padding='SAME',
+                      kernel_init=nn.initializers.he_normal())(out)
+
+        return identity + out
 
 
-class LinearLayer(tfkl.Layer):
-    def __init__(self, filters):
-        super(LinearLayer, self).__init__()
-        self.filters = filters
+class LinearLayer(nn.Module):
+    filters: int
 
-    def build(self, input_shape):
-        self.layer = tfk.Sequential([
-            tfkl.Conv2D(self.filters, kernel_size=1, padding='same',
-                        kernel_initializer=tfk.initializers.he_normal()),
-            tfkl.BatchNormalization(momentum=0.9),
-            tfkl.ReLU()
-        ])
-
-    def call(self, inputs, **kwargs):
-        res = self.layer(inputs)
-        return res
+    @nn.compact
+    def __call__(self, x, training: bool = False):
+        x = nn.Conv(self.filters, kernel_size=(1, 1), padding='SAME',
+                    kernel_init=nn.initializers.he_normal())(x)
+        x = nn.BatchNorm(momentum=0.9)(x, use_running_average=not training)
+        x = nn.relu(x)
+        return x
 
 
-class Hourglass(tfkl.Layer):
-    def __init__(self, order, filters):
-        super(Hourglass, self).__init__()
-        self.order = order
-        self.filters = filters
+class Hourglass(nn.Module):
+    order: int
+    filters: int
 
-    def build(self, input_shape):
-        self.input_bottleneck = BottleneckBlock(self.filters)
-        self.up_bottleneck = BottleneckBlock(self.filters)
-        self.max_pool = tfkl.MaxPool2D(pool_size=2, strides=2)
-        self.lower_pre = BottleneckBlock(self.filters)
-        self.lower = BottleneckBlock(self.filters) if self.order == 1 else Hourglass(self.order - 1, self.filters)
-        self.lower_pre_up_sampling = BottleneckBlock(self.filters)
-        self.up_sampling = tfkl.UpSampling2D(size=2)
+    @nn.compact
+    def __call__(self, inputs, training: bool = False):
+        x = BottleneckBlock(self.filters, name='input_bottleneck')(inputs, training=training)
+        up = BottleneckBlock(self.filters, name='up_bottleneck')(x, training=training)
 
-    def call(self, inputs, **kwargs):
-        x = self.input_bottleneck(inputs)
-        up = self.up_bottleneck(x)
+        lower = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2), padding='VALID')
+        lower = BottleneckBlock(self.filters, name='lower_pre')(lower, training=training)
 
-        lower = self.max_pool(x)
-        lower = self.lower_pre(lower)
-        lower = self.lower(lower)
-        lower = self.lower_pre_up_sampling(lower)
-        lower = self.up_sampling(lower)
+        if self.order == 1:
+            lower = BottleneckBlock(self.filters, name='lower')(lower, training=training)
+        else:
+            lower = Hourglass(self.order - 1, self.filters, name='lower')(lower, training=training)
 
-        res = up + lower
-        return res
+        lower = BottleneckBlock(self.filters, name='lower_pre_up_sampling')(lower, training=training)
+        # nearest-neighbour 2x upsampling (equivalent to UpSampling2D(size=2))
+        lower = jnp.repeat(jnp.repeat(lower, 2, axis=1), 2, axis=2)
+
+        return up + lower
